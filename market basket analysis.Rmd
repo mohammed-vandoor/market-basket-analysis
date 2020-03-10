@@ -1,0 +1,232 @@
+---
+title: "Market_basket_analysis"
+author: "Mohammed_Nihal"
+date: "3/4/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Loading librarys
+
+```{r message=FALSE}
+library(RMySQL)
+library(DBI)
+library(arules)
+library(Matrix)
+library(dplyr)
+library(arulesViz)
+library(ggplot2)
+```
+
+
+# Connecting to local data base
+
+```{r}
+mydb <-  dbConnect(RMySQL::MySQL(),
+                  username = "root",
+                  password = "rootpassword",
+                  host = "127.0.0.1",
+                  port = 3306,
+                  dbname = "imarket_sql"
+)
+```
+
+
+
+
+# Extracting dataset from the local data base
+
+```{r}
+rs = dbSendQuery(mydb, "select * from line_item")
+line_item = fetch(rs, n=-1)
+rs = dbSendQuery(mydb, "select * from orders")
+orders=fetch(rs, n=-1)
+rs = dbSendQuery(mydb, "select * from products")
+products=fetch(rs, n=-1)
+```
+
+### * it is seen that there are some comma's instead of decimal points in the data set
+
+# Replace the  comma's with deimal points in unit price and total paid
+
+```{r warning=FALSE}
+line_item$unit_price=as.numeric(gsub(",",".",line_item$unit_price))
+orders$total_paid=as.numeric(gsub(",",".",orders$total_paid))
+
+
+```
+
+
+
+# Merge the line_item and order
+
+```{r}
+line_order=merge.data.frame(line_item,orders,by="id_order")
+
+```
+#### we have to do some data quality process in the data set
+#### first of all we need to remove incompleted orders from the data.
+#### then we need to check whether is there any diffrence in the prices 
+#### if so try to modify or filter the uneven changes
+
+
+
+# Exclude not completed orders from the data set
+
+```{r}
+line_order=line_order %>% 
+  filter(state=='Completed')
+```
+
+
+# Find the difference between the prices in line_item and order
+
+```{r}
+data_diff =line_order %>% 
+  group_by(id_order) %>% 
+  summarise(sum_products=sum(unit_price*product_quantity), total_paid = mean(total_paid)) %>% 
+  mutate(differance =(sum_products - total_paid))
+```
+
+# Plot the graph of sum of product and total paid
+
+```{r}
+data_diff %>% ggplot(aes(sum_products,total_paid))+geom_point()+geom_abline()
+```
+
+
+
+* remove the unexplainable differences
+
+# Set some conditions to remove the unjustifiable diffrence
+
+```{r}
+select_id_order = data_diff %>% filter(differance<=sum_products*.7,differance>=-sum_products*.6)
+```
+
+
+# Plot the graph after filtration
+
+```{r}
+select_id_order %>% ggplot(aes(sum_products,total_paid))+geom_point()+geom_abline()
+```
+
+# Merge product to line item
+
+```{r}
+line_product=merge(line_item,products,by="sku")
+```
+
+# Merge line product data set with the data set filtered previously
+
+```{r}
+filterd_data= merge(line_product,select_id_order,by='id_order')
+filterd_data$price=as.numeric(filterd_data$price)
+filterd_data=filterd_data %>% mutate(diffrence=abs(price-unit_price))
+```
+
+#### it is seen that there are some missing decimal points in the price table
+
+
+# Fix the typing error in the price table
+
+```{r}
+data_error=filterd_data %>% select(id_order,name_en,sku,unit_price,price) %>%
+  mutate(diffrence=abs(as.numeric(price)-unit_price)) %>% filter(diffrence>=unit_price,diffrence>=(as.numeric(price)*.95))
+remaining=filterd_data %>% select(id_order,name_en,sku,unit_price,price) %>%
+  mutate(diffrence=abs(as.numeric(price)-unit_price)) %>% 
+  filter(!(diffrence>=unit_price & diffrence>=(as.numeric(price)*.95)))
+
+
+```
+
+
+# Do a for loop to find the exact position of decimal point  
+
+```{r}
+
+for (row in 1:nrow(data_error)) {
+  price <- as.numeric(data_error$price)
+  unit_price  <-as.numeric( data_error$unit_price)
+  x<-nchar(as.character(as.integer(unit_price)))
+  y<-nchar(as.character(as.integer(price)))
+  data_error$price=(price/10^(y-x))
+  data_error$diffrence=abs(price-unit_price)
+ 
+}
+ 
+```
+
+# Add the modified price to the remaining data set
+
+```{r}
+filterd_data1=rbind(data_error,remaining)
+```
+
+
+# Remove the unjustifiable price difference
+
+```{r}
+data_diff2=filterd_data1 %>%select(id_order,name_en,unit_price,price)%>%
+  mutate(diffrence=abs(as.numeric(price)-unit_price)) %>% filter(diffrence<=.75*as.numeric(price))
+```
+
+
+# Write a csv file
+
+```{r}
+write.csv(data_diff2,file ="filterd_dataset" )
+```
+
+
+# Read the dataset with  read transaction
+
+```{r}
+modal_set<-read.transactions(file = "filterd_dataset",format = c("single"),
+                               header=TRUE,sep = ",",cols = c("id_order","name_en"))
+```
+
+
+# Find the number of items per transaction 
+
+```{r}
+table(size(modal_set))
+
+```
+
+
+
+# Apply the apriori rule to the transaction
+
+```{r}
+RulesName <- apriori (modal_set, parameter = list(supp = 0.0004 , conf = 0.0002257014,minlen=2))
+```
+
+
+# Select top ten rules and plot the graph
+
+
+```{r}
+top10subRules <- head(RulesName, n = 10, by = "confidence")
+
+plot(top10subRules
+     , method = "graph",  engine = "htmlwidget")
+```
+
+
+
+
+
+# top recommendations from the analysis
+
+### * OWC Kit of 5 tools for Mac and PC  =>  Samsung 850 EVO SSD Disk 500GB
+### * Smart Apple iPad Keyboard Case Keyboard Pro 10.5  <=> Apple Pencil
+### * OEM 5W USB Power Adapter iPhone iPod and compatible Apple iPod <=> Apple Lightning Cable Connector to USB 1m White (OEM)
+### * Spanish Keyboard Magic Apple Mac=> Apple Magic Mouse 2 <= Apple Magic Spanish Keyboard Keypad Bluetooth Mac  
+### * OWC In-line Digital Temperature Sensor Kit HDD iMac 2011   <=> AdaptaDrive NewerTech adapter 2.5 to 3.5 SATA
+
+
